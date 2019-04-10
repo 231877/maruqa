@@ -1,10 +1,11 @@
 import sqlite3, vk_api, time, datetime, threading, math, random, json, re, os, glob, requests
 from vk_api.keyboard import VkKeyboard
 from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
+from vk_api.utils import get_random_id
 
 from location import *
 
-commands, token, login, password = [], "access token", "login", "password"
+commands, token, login, password = [], "token", "login", "password"
 admin = ['!отправить', '!забанить', '!инфо']
 icons, assoc, Travel = {
 	'coins': '&#128176;',
@@ -198,9 +199,9 @@ class Core:
 	def __init__(self, token='', login='', password='',group_id=0):
 		def auth(): return input("key code auth: "), True
 		def captcha(capt): return capt.try_again(input("captcha code {0}: ".format(capt.get_url()).strip()))
-		admin = vk_api.VkApi(login=login, password=password, auth_handler=auth, captcha_handler=captcha)
+		admin = vk_api.VkApi(login=login, password=password, auth_handler=auth, captcha_handler=captcha, api_version='5.92')
 		admin.auth()
-		self.session, self.hour, self.vk, self.group_id, self.day = admin.get_api(), datetime.datetime.today().hour, vk_api.VkApi(token=token), group_id, datetime.datetime.today().weekday()
+		self.session, self.hour, self.vk, self.group_id, self.day = admin.get_api(), datetime.datetime.today().hour, vk_api.VkApi(token=token, api_version='5.92'), group_id, datetime.datetime.today().weekday()
 		self.query, self.world, self.check, self.translate = Query(db='db.splite'), Query(db='main.db'), Check(vk=self.vk, group_id=group_id), Translate()
 		for row in self.world.many("SELECT `id` FROM `location`"): Travel[row[0]] = self.travel(row[0])
 		self.location, self.gui = Location({
@@ -334,10 +335,13 @@ class Core:
 		return []
 	def send(self, user_id=0, message='', keyboard=None): # отправка сообщений:
 		try:
-			arr = {'user_id': user_id, 'message': message }
+			arr = {'user_id': user_id, 'message': message, 'random_id': get_random_id() }
 			if keyboard is not None: arr['keyboard'] = keyboard
 			self.vk.method('messages.send', arr)
-		except: self.gui.add_error(text='{0} закрыл доступ к сообщениям!'.format(user_id))
+		except Exception as err:
+			arr = {'user_id': user_id, 'message': message, 'random_id': get_random_id() }
+			self.vk.method('messages.send', arr)
+			self.gui.add_error(text='{0}: {1}'.format(user_id, err))
 	def send_all(self, message=None, user_id=0): # отправка сообщения большому кол-ву человек:
 		ids = []
 		for user in self.query.many("SELECT * FROM `tavern`"):
@@ -351,7 +355,7 @@ class Core:
 		if math.floor(result - math.floor(result / 60) * 60) > 0: text += "%r сек."%math.floor(result - math.floor(result / 60) * 60)
 		return text
 	def table(self, count=3): # редактировании описания группы:
-		text, arr = "Копилка: %s\n\nЛидеры арены:\n"%self.translate.number(int(self.world.one("SELECT `coins` FROM `world`")[0])), []
+		text, arr = "Копилка: %s\n\n&#128302; Лидеры арены:\n"%self.translate.number(int(self.world.one("SELECT `coins` FROM `world`")[0])), []
 		for row in self.query.many("SELECT * FROM `users` WHERE `rating`>0"):
 			user = self.player(row)
 			arr.append({
@@ -438,13 +442,13 @@ class Core:
 						else: damage += item['effect']
 		return armor, damage
 	def add_inv(self, inv=None, item=None, count=1):
-		if item in inv: inv[item]['count'] += count
-		else: inv[item] = {'name': item, 'count': count}
+		if item in inv: inv[item] += count
+		else: inv[item] = count
 		return inv
 	def craft(self, inv=None, item=None):
 		for row in item['need']:
 			if row in inv:
-				if inv[row]['count'] >= item['need'][row]: inv[row]['count'] -= item['need'][row]
+				if inv[row] >= item['need'][row]: inv[row] -= item['need'][row]
 				else: return None
 			else: return None
 		inv = self.add_inv(inv=inv, item=item['name'])
@@ -464,12 +468,13 @@ class Local: # доп.функции:
 		else: text = "Поменять имя? (100 %s)\n(да, нет)"%icons['coins']
 		return text
 	def traid(self, page=0, user_id=0, limit=5):
-		_max = self.core.query.one("SELECT COUNT(*) FROM `traid`")[0]
+		_max, find = self.core.query.one("SELECT COUNT(*) FROM `traid`")[0], False
 		text, count, offset, keys = "&#9878; Рынок: (страница %r из %r)\n"%(int(page / limit) + 1, math.ceil(_max / limit)), 0, page, []
 		for row in self.core.query.many("SELECT * FROM `traid` LIMIT %r OFFSET %r"%(limit, page)):
-			slot, offset = json.loads(row[2]), offset + 1
+			slot, offset, find = json.loads(row[2]), offset + 1, True
 			item = self.core.item(slot['name'])
 			if item is not None: text += "%r. продается %r шт. %s %s за %s %s\n"%(offset, slot['count'], item['icon'], item['name'], self.core.translate.number(row[3]), icons['coins'])
+		if not find: text += "Ничего нет!\n"
 		if page: keys.append({'text': 'Страница %r'%int(page / limit), 'color': 'positive'})
 		if page < _max - limit: keys.append({'text': 'Страница %r'%int(page / limit + 2), 'color': 'positive'})
 		if len(keys): keys.append({'line': 1})
@@ -533,7 +538,7 @@ class Game: # игра:
 		self.core.gui.add_print(text="новый пользователь: %s!"%(data['first_name'] + ' ' + data['last_name']), name=data['first_name'] + ' ' + data['last_name'])
 		return text;
 	def clear(self): # применение запросов:
-		if len(commands): 
+		if len(commands):
 			self.core.query.save(';'.join(commands) + ';');
 			commands.clear();
 	def level(self, level): return level * 5 + (level + 1)**2; # нужное кол-во опыта для уровня.
@@ -855,8 +860,8 @@ class Game: # игра:
 										else: raise Exception("Этот предмет невозможно создать!")
 									elif find == 'продать': # продажа предметов:
 										if item['name'] in data['inv']:
-											if data['inv'][item['name']]['count'] >= obj['count']:
-												data['inv'][item['name']]['count'] -= obj['count']
+											if data['inv'][item['name']] >= obj['count']:
+												data['inv'][item['name']] -= obj['count']
 												commands.append("UPDATE `users` SET `inv`='%s' WHERE `username`=%s"%(json.dumps(data['inv']), user_id))
 												commands.append("INSERT INTO `traid` (username, vk_name, item, buy) VALUES (%s, '%s', '%s', %r)"%(user_id, data['vk_name'], json.dumps({'name': item['name'], 'count': obj['count']}), obj['price']))
 												self.quest(value='sell', data=data, user_id=user_id, save=True)
@@ -866,9 +871,9 @@ class Game: # игра:
 										else: raise Exception("У вас нет %s %s!"%(item['icon'], item['name']))
 									elif find == 'использовать': # использование предмета:
 										if item['name'] in data['inv']:
-											if data['inv'][item['name']]['count'] > 0:
+											if data['inv'][item['name']] > 0:
 												if 'type' in item:
-													data['inv'][item['name']]['count'] -= 1
+													data['inv'][item['name']] -= 1
 													if item['type'] == 'upgrade': # улучшения:
 														if item['name'] in data['upgrade']: raise Exception("У вас уже установлен %s %s!"%(item['icon'], item['name']))
 														data['upgrade'].append(item['name'])
@@ -894,7 +899,7 @@ class Game: # игра:
 														raise Exception("Вы взяли %s %s!"%(item['icon'], item['name']))
 													elif item['type'] == 'health': # зелья:
 														data['hp'] = min(data['hp'] + item['effect'], 5)
-														commands.append("UPDATE `users` SET `inv`='%s',`hp`=%r WHERE `username`=%s"%(json.dumps(data['inv']), data['hp'], user_id))
+														commands.append("UPDATE `users` SET `inv`='{0}',`hp`={1} WHERE `username`={2}".format(json.dumps(data['inv']), data['hp'], user_id))
 														raise Exception("Вы использовали %s %s!\n+%r %s здоровье! %r/5 %s"%(item['icon'], item['name'], item['effect'], icons['health'], data['hp'], icons['health']))
 												else: raise Exception("Этот предмет нельзя использовать!")
 											else: raise Exception("Недостаточно ресурсов!")
@@ -1054,7 +1059,7 @@ class Game: # игра:
 				local = self.core.assoc(data['location'])
 				if local in self.core.location._list: keyboard = self.core.location.keyboard(local)
 				if local == 'character': 
-					text, c_armor = "Персонаж (%s):\n\n%s: %r/5 %s: %r/%r %s: %s\nУровень: %r %s\n\n"%(data['vk_name'], icons['health'], data['hp'], icons['energy'], math.floor(data['energy']), 5 * (2 - int(not 'энергохранилище' in data['upgrade'])), icons['coins'], self.core.translate.number(data['coins']), data['level'], ["(%s: %r/%r %s: %r)"%(icons['xp'], data['xp'], self.level(data['level']), '&#128302;', data['rating']), "(%s: %r %s: %r)"%(icons['xp'], data['xp'], '&#128302;', data['rating'])][data['level'] >= 20]), (self.core.stats(data=data['armor']))
+					text, c_armor = "Персонаж (%s):\n\nУровень: %r %s\n%s: %r/5 %s: %r/%r %s: %s\n\n"%(data['vk_name'], data['level'], ["(%s: %r/%r %s: %r)"%(icons['xp'], data['xp'], self.level(data['level']), '&#128302;', data['rating']), "(%s: %r %s: %r)"%(icons['xp'], data['xp'], '&#128302;', data['rating'])][data['level'] >= 20], icons['health'], data['hp'], icons['energy'], math.floor(data['energy']), 5 * (2 - int(not 'энергохранилище' in data['upgrade'])), icons['coins'], self.core.translate.number(data['coins'])), (self.core.stats(data=data['armor']))
 					for row in ['head', 'body', 'weapon']:
 						if row in data['armor']:
 							item = self.core.item(data['armor'][row])
@@ -1092,10 +1097,10 @@ class Game: # игра:
 					text = "&#127890; Инвентарь:\n\n"
 					if len(data['inv']):
 						arr = []
-						for row in sorted(data['inv'], key=lambda i: data['inv'][i]['count'], reverse=True):
+						for row in sorted(data['inv'], key=lambda i: data['inv'][i], reverse=True):
 							item = self.core.item(row)
 							if item is not None:
-								if data['inv'][row]['count'] > 0: arr.append("%r шт. %s %s"%(data['inv'][row]['count'], item['icon'], item['name']))
+								if data['inv'][row] > 0: arr.append("%r шт. %s %s"%(data['inv'][row], item['icon'], item['name']))
 						text += ', '.join(arr) + "\n"
 					else: text += "Пусто!\n"
 					text += "\n(использовать <предмет>, продать <кол-во> <предмет> <сумма>, назад)"
@@ -1128,10 +1133,10 @@ class Game: # игра:
 					else: text, is_keyboard = "Осталось %s: %s"%(icons['time'], self.core.time(data['is_travel'])), 0
 				elif local == 'player': text = "&#9876; Арена!\nВ очереди: %r &#128100;\nОжидайте вашей очереди!\n\n(назад)"%(int(self.core.query.one("SELECT COUNT(*) FROM `arena`")[0]) - 1) # арена.
 				elif local == 'city': # главный экран:
-					text, c_time = "Лагерь исследователей:\n&#127795;&#127795;&#127795;...&#127969;.....&#127972;...&#127755;&#127980;...&#127795;&#127795;&#127795;\n\n", datetime.datetime.today()
+					text, c_time, find = "Лагерь исследователей:\n&#127795;&#127795;&#127795;...&#127969;.....&#127972;...&#127755;&#127980;...&#127795;&#127795;&#127795;\n\n", datetime.datetime.today(), False
 					text += "&#128195; Ежедневные квесты: (%s)\n"%(self.core.time(time.time() + (24 * 3600 - (c_time.hour * 3600 + c_time.minute * 60)) + 1))
 					for row in self.core.world.many("SELECT * FROM `quests` WHERE `active`=1"):
-						quest, is_finish = self.core.quest(row), False
+						quest, is_finish, find = self.core.quest(row), False, True
 						text += quest['name'] + " ("
 						for key in quest['need']:
 							if quest['users'] is not None:
@@ -1151,6 +1156,7 @@ class Game: # игра:
 										item = self.core.item(val)
 										if item is not None: text += "%r %s %s "%(quest['price'][val], item['icon'], item['name'])
 						text += '\n'
+					if not find: text += "Пока ничего нет!\n"
 					text += "\n(персонаж, карта, таверна, рынок, арена)"
 			commands.append("UPDATE `users` SET `location`=%r WHERE `username`=%s"%(data['location'], user_id))
 		else: # новый пользователь:
@@ -1297,7 +1303,7 @@ class Game: # игра:
 			self.clear()
 			threading.Timer(60, self.timer).start()
 	def resend(self):
-		for user in self.core.session.messages.getConversations(group_id=self.core.group_id, filter='unread')['items']:
+		for user in self.core.vk.method('messages.getConversations', {'group_id':self.core.group_id, 'filter': 'unread'})['items']:
 			self.update(command=user['last_message']['text'], user_id=user['last_message']['from_id'])
 
 game = Game(Core(token=token, login=login, password=password, group_id=173231254))
